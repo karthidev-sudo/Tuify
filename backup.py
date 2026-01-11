@@ -477,50 +477,52 @@ class MusicTUI:
 
     # --- NEW: External Command Listener ---
    # --- UPDATED: External Command Listener in backup.py ---
-    def check_external_commands(self):
-        """Checks for commands from Rofi"""
+def check_external_commands(self):
+        """Robust Listener for Rofi Commands"""
         if not os.path.exists(CMD_FILE): return
         try:
-            with open(CMD_FILE, "r") as f: 
+            with open(CMD_FILE, "r") as f:
                 cmd = f.read().strip()
             
-            # Remove file so we don't process the same command twice
+            # Delete command file immediately to prevent loops
             if os.path.exists(CMD_FILE): os.remove(CMD_FILE)
             
+            if not cmd: return
             parts = cmd.split(":", 1)
             action = parts[0]
             
             if action == "SEARCH":
                 query = parts[1]
                 self.search_term = query
-                self.status_message = f"Rofi Search: {query}"
+                # Force UI update
+                self.status_message = f"Searching: {query}"
                 self.draw_screen()
                 
-                # Fetch results
+                # Fetch and save results
                 self.results, _ = self.fetch_itunes_results(query)
                 self.mode = "SEARCH"
                 self.selected_index = 0
                 
-                # Write results for Rofi
                 with open(ROFI_LIST_FILE, "w") as f:
                     for item in self.results:
                         f.write(f"{item['track']} - {item['artist']}\n")
-                    f.flush() # Ensure data is written to disk
-                
-                # SIGNAL BASH: Create the status file ONLY after the list is ready
-                with open(STATUS_FILE, "w") as f: 
-                    f.write("DONE")
-                
+                    f.flush()
+                    os.fsync(f.fileno()) # Ensure file is physically written
+
+                # SIGNAL BASH: Always create this to stop Rofi from hanging
+                with open(STATUS_FILE, "w") as f: f.write("DONE")
+
             elif action == "PLAY_INDEX":
                 idx = int(parts[1])
                 if 0 <= idx < len(self.results):
                     self.selected_index = idx
                     self.play_selection()
         except Exception as e:
-            # If something fails, at least create the status file to unblock Rofi
-            with open(STATUS_FILE, "w") as f: f.write(f"ERROR: {e}")
+            # Emergency release for Rofi
+            if not os.path.exists(STATUS_FILE):
+                with open(STATUS_FILE, "w") as f: f.write("ERROR")
 
-            
+
     def run(self):
         self.stdscr.timeout(100) 
         while True:
