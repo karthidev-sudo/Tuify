@@ -1,4 +1,5 @@
 import curses
+from pypresence import Presence
 import requests
 import subprocess
 import threading
@@ -34,11 +35,56 @@ MPV_CMD = [
     "--idle=no"
 ]
 
+class DiscordRPC:
+    def __init__(self):
+        self.client_id = "1459610651390644295"
+        self.rpc = None
+        self.connected = False
+
+        try:
+            self.rpc = Presence(self.client_id)
+            self.rpc.connect()
+            self.connected = True
+        except Exception:
+            self.connected = False
+
+    def update(self, song=None, paused=False):
+        if not self.connected:
+            return
+
+        try:
+            if not song:
+                self.rpc.clear()
+                return
+
+            details = song.get("track", "Unknown Track")
+            state = song.get("artist", "Unknown Artist")
+
+            self.rpc.update(
+                details=f"🎵 {details}",
+                state=f"👤 {state}",
+                large_image="music",   # must match asset name (or remove)
+                large_text="Arch Music TUI",
+                small_image="pause" if paused else "play",
+                small_text="Paused" if paused else "Playing"
+            )
+        except Exception:
+            pass
+
+    def clear(self):
+        if self.connected:
+            try:
+                self.rpc.clear()
+            except:
+                pass
+
+
 class AudioPlayer:
     def __init__(self):
         self.process = None
         self.current_song = None
         self.is_playing = False
+        self.rpc = DiscordRPC()
         self.is_paused = False
         self.manually_stopped = False
         # Cleanup old socket
@@ -65,6 +111,7 @@ class AudioPlayer:
         
         self.manually_stopped = False
         self.current_song = song_info
+        self.rpc.update(song_info, paused=False)
         self.is_playing = True
         self.is_paused = False
         
@@ -94,12 +141,14 @@ class AudioPlayer:
         except Exception: pass
 
     def toggle_pause(self):
+        self.rpc.update(self.current_song, paused=self.is_paused)
         if self.is_playing:
             self.send_socket_command(["cycle", "pause"])
             self.is_paused = not self.is_paused
 
     def stop(self):
         self.manually_stopped = True
+        self.rpc.clear()
         if self.process:
             try:
                 self.process.terminate()
@@ -118,6 +167,7 @@ class AudioPlayer:
             except: pass
 
     def check_status(self):
+        self.rpc.clear()
         if self.process:
             if self.process.poll() is not None:
                 self.is_playing = False
@@ -426,21 +476,28 @@ class MusicTUI:
         else: self.status_message = "Start of playlist."
 
     # --- NEW: External Command Listener ---
+   # --- UPDATED: External Command Listener in backup.py ---
     def check_external_commands(self):
         """Checks for commands from Rofi"""
         if not os.path.exists(CMD_FILE): return
         try:
-            with open(CMD_FILE, "r") as f: cmd = f.read().strip()
-            os.remove(CMD_FILE)
+            with open(CMD_FILE, "r") as f: 
+                cmd = f.read().strip()
+            
+            # Remove file so we don't process the same command twice
+            if os.path.exists(CMD_FILE): os.remove(CMD_FILE)
+            
             parts = cmd.split(":", 1)
             action = parts[0]
             
             if action == "SEARCH":
-                # Perform the search silently
-                self.search_term = parts[1]
-                self.status_message = f"Rofi Search: {self.search_term}"
+                query = parts[1]
+                self.search_term = query
+                self.status_message = f"Rofi Search: {query}"
                 self.draw_screen()
-                self.results, _ = self.fetch_itunes_results(self.search_term)
+                
+                # Fetch results
+                self.results, _ = self.fetch_itunes_results(query)
                 self.mode = "SEARCH"
                 self.selected_index = 0
                 
@@ -448,16 +505,22 @@ class MusicTUI:
                 with open(ROFI_LIST_FILE, "w") as f:
                     for item in self.results:
                         f.write(f"{item['track']} - {item['artist']}\n")
-                with open(STATUS_FILE, "w") as f: f.write("DONE")
-
+                    f.flush() # Ensure data is written to disk
+                
+                # SIGNAL BASH: Create the status file ONLY after the list is ready
+                with open(STATUS_FILE, "w") as f: 
+                    f.write("DONE")
+                
             elif action == "PLAY_INDEX":
-                # Play the song selected in Rofi
                 idx = int(parts[1])
                 if 0 <= idx < len(self.results):
                     self.selected_index = idx
                     self.play_selection()
-        except: pass
+        except Exception as e:
+            # If something fails, at least create the status file to unblock Rofi
+            with open(STATUS_FILE, "w") as f: f.write(f"ERROR: {e}")
 
+            
     def run(self):
         self.stdscr.timeout(100) 
         while True:
